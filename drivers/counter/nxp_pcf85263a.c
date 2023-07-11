@@ -80,27 +80,18 @@ struct nxp_pcf85263a_config {
 	struct counter_config_info generic;
 	const struct i2c_dt_spec i2c;
 	const struct gpio_dt_spec inta_gpio;
+        const uin8t_t inta_mode;
 	const struct gpio_dt_spec ts_gpio;
+        const uin8t_t ts_mode;
 };
 
 static int configure_inta_pin(const struct device *dev)
 {
 	int rc = 0;
 	const struct nxp_pcf85263a_config *cfg = dev->config;
-	uint8_t intapm_value;
-
-#ifdef CONFIG_NXP_PCF85263A_INTA_CLK_OUT
-	intapm_value = 0x00;
-#elif CONFIG_NXP_PCF85263A_INTA_BATT_OUT
-	intapm_value = 0x01;
-#elif CONFIG_NXP_PCF85263A_INTA_INT_OUT
-	intapm_value = 0x02;
-#elif CONFIG_NXP_PCF85263A_INTA_HIZ
-	intapm_value = 0x03;
-#endif
 
 	rc = i2c_reg_update_byte_dt(&cfg->i2c, PCF85263A_REG_PIN_IO,
-	BIT(1) | BIT(0), intapm_value);
+	BIT(1) | BIT(0), (uint8_t)cfg->inta_mode);
 
 	return rc;
 }
@@ -109,25 +100,13 @@ static int configure_ts_pin(const struct device *dev)
 {
 	int rc = 0;
 	const struct nxp_pcf85263a_config *cfg = dev->config;
-	uint8_t tspm_value = 0;
-
-#ifdef CONFIG_NXP_PCF85263A_TS_DISABLED
-	tspm_value = 0x00;
-#elif CONFIG_NXP_PCF85263A_TS_INTB_OUT
-	tspm_value = 0x01;
-#elif CONFIG_NXP_PCF85263A_TS_CLK_OUT
-	tspm_value = 0x02;
-#elif CONFIG_NXP_PCF85263A_TS_INPUT
-	tspm_value = 0x03;
-#endif
 
 	rc = i2c_reg_update_byte_dt(&cfg->i2c, PCF85263A_REG_PIN_IO,
-	BIT(3) | BIT(2), (tspm_value << 2));
+	BIT(3) | BIT(2), ((uint8_t)cfg->ts_mode << 2));
 
 	return rc;
 }
 
-#if defined(CONFIG_NXP_PCF85263A_INTA_INT_OUT) || defined(CONFIG_NXP_PCF85263A_TS_INTB_OUT)
 static void nxp_pcf85263a_int_callback(const struct device *port, struct gpio_callback *cb,
 	uint32_t pin)
 {
@@ -157,7 +136,6 @@ static void nxp_pcf85263a_interrupt_worker(struct k_work *work)
 	}
 
 }
-#endif
 
 int nxp_pcf85263a_init(const struct device *dev)
 {
@@ -200,25 +178,33 @@ int nxp_pcf85263a_init(const struct device *dev)
 		}
 	}
 
-#if defined(CONFIG_NXP_PCF85263A_INTA_INT_OUT) || defined(CONFIG_NXP_PCF85263A_TS_INTB_OUT)
-	k_work_init(&data->interrupt_worker, nxp_pcf85263a_interrupt_worker);
-#endif
+        if(cfg->inta_mode == 0x02 || cfg->ts_mode == 0x01) {
+                /* INTA or TS pin was set to "interrupt" mode. 
+                This code initializes the interrupt worker. */
+	        k_work_init(&data->interrupt_worker, nxp_pcf85263a_interrupt_worker);
+        }
 
-#if defined(CONFIG_NXP_PCF85263A_TS_INTB_OUT) || defined(CONFIG_NXP_PCF85263A_TS_CLK_OUT)
-	if (device_is_ready(cfg->ts_gpio.port)) {
-		rc = gpio_pin_configure_dt(&cfg->ts_gpio, GPIO_INPUT);
-		if (rc < 0) {
-			return rc;
-		}
-	}
-#else
-	if (device_is_ready(cfg->ts_gpio.port)) {
-		rc = gpio_pin_configure_dt(&cfg->ts_gpio, GPIO_OUTPUT);
-		if (rc < 0) {
-			return rc;
-		}
-	}
-#endif
+        if(cfg->ts_mode == 0x01 || cfg->ts_mode == 0x02) {
+                /* TS pin was set to output either an "interrupt" 
+                or a "clock" signal. If connected to the MCU, the
+                TS pin must be configured as INPUT on the MCU side. */
+                if (device_is_ready(cfg->ts_gpio.port)) {
+		        rc = gpio_pin_configure_dt(&cfg->ts_gpio, GPIO_INPUT);
+		        if (rc < 0) {
+			        return rc;
+		        }
+	        }
+        } else {
+                /* TS pin was disabled or set as an input for the RTC.
+                If connected, the TS pin must be configured as OUPUT on
+                the MCU side. */
+                if (device_is_ready(cfg->ts_gpio.port)) {
+                        rc = gpio_pin_configure_dt(&cfg->ts_gpio, GPIO_OUTPUT);
+                        if (rc < 0) {
+                                return rc;
+                        }
+                }
+        }
 
 	return rc;
 }
@@ -388,7 +374,8 @@ int nxp_pcf85263a_set_alarm(const struct device *dev, uint8_t id,
 	data->alarm_callbacks[id-1] = alarm_cfg->callback;
 	data->alarm_user_data[id-1] = alarm_cfg->user_data;
 
-	#if CONFIG_NXP_PCF85263A_INTA_INT_OUT
+        if (cfg->inta_mode == 0x02) {
+                /* INTA pin was set as an interrupt. */
 		if (alarm_cfg->flags & PCF85263A_ALARM_FLAGS_USE_INTA) {
 			if (cfg->inta_gpio.port == NULL) {
 				LOG_ERR("INTA pin not found.");
@@ -414,7 +401,8 @@ int nxp_pcf85263a_set_alarm(const struct device *dev, uint8_t id,
 			if (rc < 0)
 				return rc;
 		}
-	#elif CONFIG_NXP_PCF85263A_TS_INTB_OUT
+        } else if (cfg->ts_mode == 0x01) {
+                /* INTB pin was set as an interrupt. */
 		if (alarm_cfg->flags & PCF85263A_ALARM_FLAGS_USE_INTB) {
 			if (cfg->ts_gpio.port == NULL) {
 				LOG_ERR("TS pin not found.");
@@ -439,9 +427,9 @@ int nxp_pcf85263a_set_alarm(const struct device *dev, uint8_t id,
 			if (rc < 0)
 				return rc;
 		}
-	#else
-	#warning "NXP_PXF85263A: No interrupt pin (INTA or INTB) configured."
-	#endif
+	} else {
+                LOG_WARN("No interrupt pin (INTA or INTB) configured.");
+        }
 
 	if (id == 1) {
 		i2c_reg_update_byte_dt(&cfg->i2c, PCF85263A_REG_ALARM_ENABLES,
@@ -547,7 +535,9 @@ static const struct counter_driver_api pcf85263a_api = {
 		},									\
 		.i2c = I2C_DT_SPEC_INST_GET(index),					\
 		.inta_gpio = GPIO_DT_SPEC_INST_GET_OR(index, inta_gpios, {0}),		\
+                .inta_mode = DT_ENUM_IDX_OR(index, inta_mode, 3),                       \
 		.ts_gpio = GPIO_DT_SPEC_INST_GET_OR(index, ts_gpios, {0}),		\
+                .ts_mode = DT_ENUM_IDX_OR(index, ts_mode, 0),                           \
 	};										\
 											\
 	DEVICE_DT_INST_DEFINE(index, nxp_pcf85263a_init, NULL, &pcf85263a_data_##index, \

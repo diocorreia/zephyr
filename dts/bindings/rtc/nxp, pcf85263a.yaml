@@ -12,5 +12,21 @@ properties:
   inta-gpios:
     type: phandle-array
 
+  inta-mode:
+    type: string
+    enum:
+      - "clock"
+      - "battery"
+      - "interrupt"
+      - "high-z"
+
   ts-gpios:
     type: phandle-array
+
+  ts-mode:
+    type: string
+    enum:
+      - "disabled"
+      - "interrupt"
+      - "clock"
+      - "input"
